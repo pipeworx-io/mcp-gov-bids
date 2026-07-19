@@ -1,8 +1,8 @@
 # mcp-gov-bids
 
-Live open US government bid solicitations (RFPs/RFQs) from Bonfire city & county portals — keyless
+Open & historical US government bid solicitations from city/county portals — updated daily
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1330+ live data sources.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1334+ live data sources.
 
 ## Tools
 
@@ -23,7 +23,7 @@ Add to your MCP client (Claude Desktop, Cursor, Windsurf, etc.):
 }
 ```
 
-Or connect to the full Pipeworx gateway for access to all 1330+ data sources:
+Or connect to the full Pipeworx gateway for access to all 1334+ data sources:
 
 ```json
 {

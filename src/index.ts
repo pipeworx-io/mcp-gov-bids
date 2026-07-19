@@ -17,169 +17,119 @@ interface McpToolExport {
 }
 
 /**
- * Gov Bids MCP — live OPEN government bid solicitations from Bonfire portals.
+ * Gov Bids MCP — open & historical US government bid solicitations (Wave 4b, hosted).
  *
- * US state/local bid portals have no sanctioned public API, but Bonfire (Euna),
- * the most common big-city/county bid platform, serves its public opportunity
- * list from an anonymous session endpoint that its own SPA calls:
- *   1. GET https://<portal>.bonfirehub.com/portal/  → sets `bonfirehub` session
- *      cookie + `XSRF-TOKEN` cookie.
- *   2. GET /PublicPortal/getOpenPublicOpportunitiesSectionData with those cookies
- *      + the XSRF token echoed as `X-XSRF-TOKEN` → JSON {payload:{projects:{...}}}.
- * No API key. This pack fronts that across a registry of Bonfire portals,
- * normalized, so an agent can find open bids by jurisdiction/keyword.
+ * Reads the Pipeworx-hosted `procurement_bids` table (Supabase), populated daily
+ * by the bonfire-sync Edge Function from Bonfire (Euna) city/county portals — the
+ * most common US public bid platform, whose live open-opportunity list has no
+ * sanctioned API. The moat: we never delete — when a bid drops off the source's
+ * open list we flip it to 'closed' and keep it, so the history of what each
+ * jurisdiction bids out accumulates (nobody else keeps this).
  *
- * Wave 4a (live-fetch). The hosted-history version (never-delete moat, gov-auction
- * pattern) is Wave 4b — see docs/us-procurement-build-plan.md.
+ * Stateless/keyless for callers; the gateway injects _supabaseUrl/_supabaseKey.
  */
 
 
-const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
-
-// Bonfire portals (subdomain → display jurisdiction). Grows freely; every
-// bonfirehub.com subdomain uses the identical endpoint. Seed = big verified ones.
-const PORTALS: Array<{ key: string; sub: string; name: string }> = [
-  { key: 'fort-worth-tx', sub: 'fortworthtexas', name: 'Fort Worth, TX' },
-  { key: 'harris-county-tx', sub: 'harriscountytx', name: 'Harris County, TX' },
-  { key: 'broward-county-fl', sub: 'broward', name: 'Broward County, FL' },
-  { key: 'cook-county-il', sub: 'cookcountyil', name: 'Cook County, IL' },
-  { key: 'clark-county-nv', sub: 'clarkcountynv', name: 'Clark County, NV' },
-  { key: 'dallas-tx', sub: 'dallascityhall', name: 'Dallas, TX' },
-];
-
-const BY_KEY = new Map(PORTALS.map((p) => [p.key, p]));
+type Cfg = { url: string; key: string };
 
 const tools: McpToolExport['tools'] = [
   {
     name: 'open_bids_search',
     description:
-      "Find OPEN government bid solicitations (RFPs/RFQs/IFBs) that vendors can currently respond to, from US city & county Bonfire procurement portals — live, keyless. Filter by keyword (matches the solicitation title) and/or a specific jurisdiction; omit jurisdiction to search all covered portals. Returns each open opportunity with its title, reference number, awarding jurisdiction, close date, and the URL to view/respond. Use this for 'what contracts is <city/county> currently bidding out' or 'open RFPs for <keyword>'. This is LIVE OPEN BIDS (for awarded/historical contracts use gov_contracts_search).",
+      "Find OPEN US government bid solicitations (RFPs/RFQs/IFBs) that vendors can currently respond to, from city & county procurement portals — updated daily. Filter by keyword (matches solicitation title/reference), jurisdiction, and closing window. Returns each opportunity with title, reference number, awarding jurisdiction, close date, and the URL to respond. By default returns OPEN bids sorted by soonest close date; set status to 'closed' or 'all' to search past solicitations too (we retain history). Use for 'what is <city/county> currently bidding out' or 'open RFPs for <keyword>'. This is LIVE OPEN BIDS (for awarded contracts use gov_contracts_search).",
     inputSchema: {
       type: 'object' as const,
       properties: {
-        jurisdiction: { type: 'string', description: 'Portal key to target (e.g. "fort-worth-tx", "harris-county-tx", "cook-county-il"). Omit to search all covered jurisdictions. Use gov_bids_jurisdictions to list keys.' },
-        keyword: { type: 'string', description: 'Case-insensitive substring to match against the solicitation title, e.g. "construction", "audit", "software".' },
-        limit: { type: ['number', 'string'], description: 'Max open bids per jurisdiction (default 25).' },
+        jurisdiction: { type: 'string', description: 'Jurisdiction key to target (e.g. "fort-worth-tx", "harris-county-tx", "cook-county-il"). Omit for all covered jurisdictions. Use gov_bids_jurisdictions to list keys.' },
+        keyword: { type: 'string', description: 'Case-insensitive substring matched against the solicitation title/reference, e.g. "construction", "audit", "software".' },
+        closing_within_days: { type: ['number', 'string'], description: 'Only OPEN bids closing within this many days from now.' },
+        status: { type: 'string', enum: ['open', 'closed', 'all'], description: "Bid status (default 'open'). 'closed' / 'all' search retained history." },
+        limit: { type: ['number', 'string'], description: 'Max bids (default 25, max 100).' },
       },
     },
   },
   {
     name: 'gov_bids_jurisdictions',
     description:
-      'List the US city & county Bonfire procurement portals covered by open_bids_search, with each portal key, jurisdiction name, and current live open-bid count.',
+      'List the US city & county procurement portals covered by open_bids_search, with each jurisdiction key, name, and current open-bid count.',
     inputSchema: { type: 'object' as const, properties: {} },
   },
 ];
 
-interface BonfireProject {
-  ProjectID?: string;
-  ReferenceID?: string;
-  ProjectName?: string;
-  DateClose?: string;
-  ProjectStatusID?: string;
-  DepartmentID?: string;
-}
-
-// Anonymous session handshake: fetch the portal page for the session +
-// XSRF-TOKEN cookies, then call the section endpoint echoing the XSRF token.
-async function fetchOpenProjects(sub: string): Promise<BonfireProject[]> {
-  const base = `https://${sub}.bonfirehub.com`;
-  const page = await fetch(`${base}/portal/`, { headers: { 'User-Agent': UA, Accept: 'text/html' } });
-  if (!page.ok) throw new Error(`portal ${page.status}`);
-  const setCookies: string[] =
-    typeof (page.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie === 'function'
-      ? (page.headers as unknown as { getSetCookie: () => string[] }).getSetCookie()
-      : page.headers.get('set-cookie')
-        ? [page.headers.get('set-cookie') as string]
-        : [];
-  const jar = setCookies.map((c) => c.split(';')[0]);
-  const cookie = jar.join('; ');
-  const xsrf = jar.find((c) => c.startsWith('XSRF-TOKEN='))?.split('=')[1] ?? '';
-  const res = await fetch(`${base}/PublicPortal/getOpenPublicOpportunitiesSectionData`, {
-    headers: {
-      'User-Agent': UA,
-      Accept: 'application/json',
-      'X-Requested-With': 'XMLHttpRequest',
-      Cookie: cookie,
-      ...(xsrf ? { 'X-XSRF-TOKEN': decodeURIComponent(xsrf) } : {}),
-    },
+async function pg(cfg: Cfg, path: string, extraHeaders?: Record<string, string>): Promise<Response> {
+  return fetch(`${cfg.url}/rest/v1/${path}`, {
+    headers: { apikey: cfg.key, Authorization: `Bearer ${cfg.key}`, ...(extraHeaders ?? {}) },
   });
-  if (!res.ok) throw new Error(`opportunities ${res.status}`);
-  const data = (await res.json()) as { success?: number; payload?: { projects?: Record<string, BonfireProject> } };
-  if (!data.success || !data.payload?.projects) return [];
-  return Object.values(data.payload.projects);
 }
 
-function normalize(p: BonfireProject, portal: { key: string; sub: string; name: string }): Record<string, unknown> {
-  const id = p.ProjectID ?? '';
+function esc(s: string): string {
+  // PostgREST ilike value: escape commas/parens that would break the filter.
+  return s.replace(/[(),]/g, ' ');
+}
+
+function shape(r: Record<string, unknown>): Record<string, unknown> {
   return {
-    jurisdiction: portal.key,
-    jurisdiction_name: portal.name,
-    title: p.ProjectName ?? null,
-    reference: p.ReferenceID ?? null,
-    close_date: p.DateClose ?? null,
-    status: 'open',
-    url: id ? `https://${portal.sub}.bonfirehub.com/opportunities/${id}` : `https://${portal.sub}.bonfirehub.com/portal/`,
-    source: 'bonfire',
+    jurisdiction: r.jurisdiction_key,
+    jurisdiction_name: r.jurisdiction,
+    title: r.title ?? null,
+    reference: r.reference ?? null,
+    close_date: r.close_date ?? null,
+    status: r.status,
+    url: r.url ?? null,
+    source: r.source,
   };
 }
 
-async function openFor(portal: { key: string; sub: string; name: string }, keyword: string | undefined, limit: number): Promise<Record<string, unknown>[]> {
-  let projects = await fetchOpenProjects(portal.sub);
-  if (keyword) {
-    const k = keyword.toLowerCase();
-    projects = projects.filter((p) => (p.ProjectName ?? '').toLowerCase().includes(k));
-  }
-  return projects.slice(0, limit).map((p) => normalize(p, portal));
-}
-
-async function search(args: Record<string, unknown>): Promise<unknown> {
+async function search(cfg: Cfg, args: Record<string, unknown>): Promise<unknown> {
   const limit = Math.min(Math.max(Number(args.limit) || 25, 1), 100);
-  const keyword = typeof args.keyword === 'string' && args.keyword.trim() ? args.keyword.trim() : undefined;
-  const jurKey = typeof args.jurisdiction === 'string' && args.jurisdiction.trim() ? args.jurisdiction.trim().toLowerCase() : undefined;
-  let targets = PORTALS;
-  if (jurKey) {
-    const p = BY_KEY.get(jurKey);
-    if (!p) return { error: 'user_error', message: `Unknown jurisdiction "${jurKey}". Call gov_bids_jurisdictions for keys.` };
-    targets = [p];
+  const status = typeof args.status === 'string' && ['open', 'closed', 'all'].includes(args.status) ? args.status : 'open';
+  const q: string[] = ['select=jurisdiction_key,jurisdiction,title,reference,close_date,status,url,source'];
+  if (status !== 'all') q.push(`status=eq.${status}`);
+  const jur = typeof args.jurisdiction === 'string' && args.jurisdiction.trim() ? args.jurisdiction.trim().toLowerCase() : undefined;
+  if (jur) q.push(`jurisdiction_key=eq.${encodeURIComponent(jur)}`);
+  const kw = typeof args.keyword === 'string' && args.keyword.trim() ? args.keyword.trim().toLowerCase() : undefined;
+  if (kw) q.push(`search_blob=ilike.*${encodeURIComponent(esc(kw))}*`);
+  const within = Number(args.closing_within_days);
+  if (Number.isFinite(within) && within > 0) {
+    const until = new Date(Date.now() + within * 86400_000).toISOString();
+    q.push(`close_date=lte.${encodeURIComponent(until)}`, 'close_date=gte.now()');
   }
-  const settled = await Promise.allSettled(targets.map((p) => openFor(p, keyword, limit)));
-  const bids: Record<string, unknown>[] = [];
-  const errors: Record<string, string> = {};
-  settled.forEach((s, i) => {
-    if (s.status === 'fulfilled') bids.push(...s.value);
-    else errors[targets[i].key] = s.reason instanceof Error ? s.reason.message : String(s.reason);
-  });
-  return {
-    jurisdictions_searched: targets.map((p) => p.key),
-    count: bids.length,
-    open_bids: bids,
-    ...(Object.keys(errors).length ? { errors } : {}),
-  };
+  q.push('order=close_date.asc.nullslast', `limit=${limit}`);
+  const res = await pg(cfg, `procurement_bids?${q.join('&')}`);
+  if (!res.ok) throw new Error(`bids store: ${res.status} ${(await res.text()).slice(0, 150)}`);
+  const rows = (await res.json()) as Array<Record<string, unknown>>;
+  return { status, count: rows.length, open_bids: rows.map(shape) };
 }
 
-async function jurisdictionsList(): Promise<unknown> {
-  const rows = await Promise.all(
-    PORTALS.map(async (p) => {
-      let open_bids: number | null = null;
-      try {
-        open_bids = (await fetchOpenProjects(p.sub)).length;
-      } catch {
-        open_bids = null;
-      }
-      return { key: p.key, name: p.name, portal: `${p.sub}.bonfirehub.com`, open_bids };
-    }),
-  );
-  return { count: rows.length, jurisdictions: rows };
+async function jurisdictionsList(cfg: Cfg): Promise<unknown> {
+  // Distinct jurisdictions + open count. PostgREST group-by isn't available
+  // without an RPC, so pull open rows' jurisdiction fields (bounded) and tally.
+  const res = await pg(cfg, 'procurement_bids?select=jurisdiction_key,jurisdiction&status=eq.open&limit=5000');
+  if (!res.ok) throw new Error(`bids store: ${res.status}`);
+  const rows = (await res.json()) as Array<{ jurisdiction_key: string; jurisdiction: string }>;
+  const counts = new Map<string, { name: string; open_bids: number }>();
+  for (const r of rows) {
+    const e = counts.get(r.jurisdiction_key) ?? { name: r.jurisdiction, open_bids: 0 };
+    e.open_bids++;
+    counts.set(r.jurisdiction_key, e);
+  }
+  const jurisdictions = [...counts.entries()]
+    .map(([key, v]) => ({ key, name: v.name, open_bids: v.open_bids }))
+    .sort((a, b) => b.open_bids - a.open_bids);
+  return { count: jurisdictions.length, jurisdictions };
 }
 
 async function callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+  const url = (args._supabaseUrl as string | undefined)?.trim();
+  const key = (args._supabaseKey as string | undefined)?.trim();
+  if (!url || !key) return { error: 'gov-bids requires platform Supabase credentials (operator-configured).' };
+  const cfg: Cfg = { url, key };
   try {
     switch (name) {
       case 'open_bids_search':
-        return await search(args);
+        return await search(cfg, args);
       case 'gov_bids_jurisdictions':
-        return await jurisdictionsList();
+        return await jurisdictionsList(cfg);
       default:
         return { error: `Unknown tool: ${name}` };
     }

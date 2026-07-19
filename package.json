@@ -1,7 +1,7 @@
 {
   "name": "@pipeworx/mcp-gov-bids",
-  "version": "0.1.0",
-  "description": "Live open US government bid solicitations (RFPs/RFQs) from Bonfire city & county portals — keyless",
+  "version": "0.2.0",
+  "description": "Open & historical US government bid solicitations from city/county portals — updated daily",
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",
