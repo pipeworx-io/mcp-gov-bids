@@ -9,7 +9,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import pack from './index.js';
 
 const server = new Server(
-  { name: '@pipeworx/mcp-gov-bids', version: '0.2.1' },
+  { name: '@pipeworx/mcp-gov-bids', version: '0.2.2' },
   { capabilities: { tools: {} } },
 );
 
