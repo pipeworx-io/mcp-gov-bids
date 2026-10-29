@@ -1,0 +1,50 @@
+[
+  {
+    "name": "open_bids_search",
+    "description": "Find OPEN US government bid solicitations (RFPs/RFQs/IFBs) that vendors can currently respond to, from city & county procurement portals — updated daily. Filter by keyword (matches solicitation title/reference), jurisdiction, and closing window. Returns each opportunity with title, reference number, awarding jurisdiction, close date, and the URL to respond. By default returns OPEN bids sorted by soonest close date; set status to 'closed' or 'all' to search past solicitations too (we retain history). Use for 'what is <city/county> currently bidding out' or 'open RFPs for <keyword>'. This is LIVE OPEN BIDS (for awarded contracts use gov_contracts_search).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "jurisdiction": {
+          "type": "string",
+          "description": "Jurisdiction key to target (e.g. \"fort-worth-tx\", \"harris-county-tx\", \"cook-county-il\"). Omit for all covered jurisdictions. Use gov_bids_jurisdictions to list keys."
+        },
+        "keyword": {
+          "type": "string",
+          "description": "Case-insensitive substring matched against the solicitation title/reference, e.g. \"construction\", \"audit\", \"software\"."
+        },
+        "closing_within_days": {
+          "type": [
+            "number",
+            "string"
+          ],
+          "description": "Only OPEN bids closing within this many days from now."
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "open",
+            "closed",
+            "all"
+          ],
+          "description": "Bid status (default 'open'). 'closed' / 'all' search retained history."
+        },
+        "limit": {
+          "type": [
+            "number",
+            "string"
+          ],
+          "description": "Max bids (default 25, max 100)."
+        }
+      }
+    }
+  },
+  {
+    "name": "gov_bids_jurisdictions",
+    "description": "List the US city & county procurement portals covered by open_bids_search, with each jurisdiction key, name, and current open-bid count.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  }
+]
